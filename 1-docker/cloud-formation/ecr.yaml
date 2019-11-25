@@ -1,0 +1,19 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: Ping pong docker repo
+
+Resources:
+  PingPongDockerRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: ping-pong
+
+Outputs:
+  PingPongDockerRepoName:
+    Value: !Ref PingPongDockerRepo
+    Export:
+      Name: PingPongDockerRepo
+  PingPongDockerRepoUri:
+    Value: !Join [ '', [ !Ref 'AWS::AccountId', '.dkr.ecr.', !Ref 'AWS::Region', '.amazonaws.com/', !Ref 'PingPongDockerRepo'] ]
+    Export:
+      Name: PingPongDockerRepoUri

@@ -1,0 +1,105 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: TODO
+
+Resources:
+
+  PingPongCodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PingPongCodeBuildServiceRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: codebuild.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: PingPong-CodeBuildServicePolicy
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - s3:PutObject
+            - s3:GetObject
+            - s3:GetObjectVersion
+            - s3:ListBucket
+            Resource: '*'
+          - Effect: Allow
+            # Required actions established through trial and error
+            Action:
+            - ecr:InitiateLayerUpload
+            - ecr:GetAuthorizationToken
+            - ecr:UploadLayerPart
+            - ecr:CompleteStateUpload
+            - ecr:CompleteLayerUpload
+            # https://github.com/moby/moby/issues/19010
+            - ecr:BatchCheckLayerAvailability
+            - ecr:PutImage
+            Resource: '*'
+
+  PingPongCodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PingPongCodePipelineServiceRole
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - codepipeline.amazonaws.com
+            # Required by the action type Deploy CloudFormation
+            - cloudformation.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: /
+      Policies:
+      - PolicyName: PingPong-codepipeline-service-policy
+        PolicyDocument:
+          Statement:
+          - Action:
+            - s3:GetObject
+            - s3:GetObjectVersion
+            - s3:GetBucketVersioning
+            Resource: '*'
+            Effect: Allow
+          - Action:
+            - s3:PutObject
+            Resource:
+            - arn:aws:s3:::*
+            Effect: Allow
+          - Action:
+            - elasticloadbalancing:*
+            - autoscaling:*
+            - cloudwatch:*
+            - ecs:*
+            - codebuild:*
+            - iam:PassRole
+            Resource: '*'
+            Effect: Allow
+            # Required by the action type Deploy CloudFormation
+          - Action:
+            - cloudformation:DescribeStacks
+            - cloudformation:UpdateStack
+            Resource: '*' # TODO: could specify the stack ?
+            Effect: Allow
+          Version: 2012-10-17
+Outputs:
+  PingPongCodeBuildServiceRole:
+    Description: The ARN of the Ping Pong code build service role
+    Value: !GetAtt 'PingPongCodeBuildServiceRole.Arn'
+    Export:
+      Name: PingPongCodeBuildServiceRole
+  PingPongCodePipelineServiceRole:
+    Description: The ARN of the Ping Pong code pipeline service role
+    Value: !GetAtt 'PingPongCodePipelineServiceRole.Arn'
+    Export:
+      Name: PingPongCodePipelineServiceRole

@@ -1,0 +1,180 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: TODO
+
+Resources:
+
+  PingPongCodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        # No artifacts as docker image is getting pushed to ECR as part of build.
+        Type: NO_ARTIFACTS
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        # Accessible in the buildspec file.
+        EnvironmentVariables:
+        - Name: PING_PONG_DOCKER_REPO
+          Value: !ImportValue PingPongDockerRepoUri
+        # Docker image to use for the build project.
+        # https://docs.aws.amazon.com/codebuild/latest/userguide/build-env-ref-available.html
+        Image: aws/codebuild/standard:2.0
+        # Enables running the Docker daemon inside a Docker container.
+        # Required since this build project builds Docker images.
+        PrivilegedMode: true
+        Type: LINUX_CONTAINER
+      Name: PingPongCodeBuildProject
+      ServiceRole: !ImportValue PingPongCodeBuildServiceRole
+      Source:
+        Auth:
+          # If a personal access token is provided in the cloud formation,
+          # stack creation fails with the following error:
+          # No Access token found, please visit AWS CodeBuild console to connect to GitHub
+          # Indeed, the cloud formation documentation specifies that it shouldn't be set directly:
+          # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-codebuild-project-source.html
+          # The advice is to authorize access via the console; this should be done prior to stack creation.
+          # This differs to CodePipeline where a personal access token can be specified in the cloud formation.
+          Type: OAUTH
+        BuildSpec: 1-docker/app/buildspec.yaml
+        Type: GITHUB
+        # This will be ignored if is this build project is used in a code pipeline:
+        # the code pipeline will use the settings in its source action instead.
+        Location: https://github.com/Mullefa/tech-time-talk.git
+      SourceVersion: master
+
+  PingPongArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: ping-pong-artifacts
+
+  PingPongArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref PingPongArtifactBucket
+      PolicyDocument:
+        Statement:
+        - Sid: WhitelistedGetAndPut
+          Effect: Allow
+          Principal:
+            AWS:
+            - !ImportValue PingPongCodeBuildServiceRole # TODO: maybe not necessary?
+            - !ImportValue PingPongCodePipelineServiceRole
+          Action:
+          - s3:GetObject
+          - s3:GetObjectVersion
+          - s3:GetBucketVersioning
+          - s3:PutObject
+          Resource:
+          - !GetAtt PingPongArtifactBucket.Arn
+          - !Sub
+            - ${BucketArn}/*
+            - { BucketArn: !GetAtt PingPongArtifactBucket.Arn }
+
+  PingPongCodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      ArtifactStore:
+        Type: S3
+        Location: !Ref PingPongArtifactBucket
+      Name: PingPongCodePipeline
+      RoleArn: !ImportValue PingPongCodePipelineServiceRole
+      Stages:
+      - Name: Source
+        # For valid actions providers by category see:
+        # https://docs.aws.amazon.com/codepipeline/latest/userguide/reference-pipeline-structure.html#actions-valid-providers
+        Actions:
+        - ActionTypeId:
+            Category: Source
+            Owner: ThirdParty
+            Provider: GitHub
+            Version: 1
+          Configuration:
+            Owner: Mullefa
+            Repo: tech-time-talk
+            Branch: master
+            # When pipeline is created using cloud formation, the Oauth token must be a personal access token.
+            # Should be created according to this guide:
+            # https://docs.aws.amazon.com/codepipeline/latest/userguide/action-reference-GitHub.html#action-reference-GitHub-auth
+            OAuthToken: '{{resolve:secretsmanager:PingPongCodePipelineCreds:SecretString:GithubPersonalAccessToken}}'
+            # We don't want to poll for changes: this build pipeline will be event driven
+            PollForSourceChanges: false
+          Name: Source
+          OutputArtifacts:
+          - Name: PingPongSourceArtifact
+      - Name: Build
+        Actions:
+        - ActionTypeId:
+            Category: Build
+            Owner: AWS
+            Version: 1
+            Provider: CodeBuild
+          Configuration:
+            ProjectName: !Ref PingPongCodeBuildProject
+          InputArtifacts:
+          - Name: PingPongSourceArtifact
+          Name: Build
+          OutputArtifacts:
+          - Name: PingPongBuildArtifact
+      - Name: Deploy
+        Actions:
+        - ActionTypeId:
+            Category: Deploy
+            Owner: AWS
+            Version: 1
+            Provider: CloudFormation
+          Configuration:
+            # Creates the stack if it doesn't exist. If the stack exists, AWS CloudFormation updates the stack.
+            # If the stack exists and is in a failed state, CodePipeline won't delete and replace the stack.
+            ActionMode: CREATE_UPDATE
+            # TODO: variable?
+            StackName: PingPongService
+            # TODO: this could be a specific role
+            RoleArn: !ImportValue PingPongCodePipelineServiceRole
+            TemplatePath: PingPongSourceArtifact::2-ecs/cloud-formation/service.yaml
+            # TODO: template configuration file
+          InputArtifacts:
+          - Name: PingPongSourceArtifact
+          Name: DeployCloudformation
+          RunOrder: 1
+        - ActionTypeId:
+            Category: Deploy
+            Owner: AWS
+            Version: 1
+            Provider: ECS
+          Configuration:
+            ClusterName: !ImportValue PingPongClusterName
+            ServiceName: !ImportValue PingPongServiceName
+            # This file is created as an artifact in the build.
+            # It contains the name and location of the docker image.
+            # See buildspec.yaml for more details.
+            FileName: imagedefinitions.json
+          InputArtifacts:
+          - Name: PingPongBuildArtifact
+          Name: DeployApp
+          RunOrder: 2
+
+  PingPongCodePipelineWebhook:
+    Type: AWS::CodePipeline::Webhook
+    Properties:
+      Authentication: GITHUB_HMAC
+      AuthenticationConfiguration:
+        # Used to secure Github web hook.
+        # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-codepipeline-webhook.html
+        # https://developer.github.com/webhooks/securing/
+        SecretToken: '{{resolve:secretsmanager:PingPongCodePipelineCreds:SecretString:PingPongWebhookSecretToken}}'
+      Filters:
+      - JsonPath: '$.ref'
+        # The value of {Branch} to match on is determined by the configuration of the source action.
+        MatchEquals: refs/heads/{Branch}
+      Name: PingPongCodePipelineWebhook
+      RegisterWithThirdParty: true
+      TargetAction: Source
+      TargetPipeline: !Ref PingPongCodePipeline
+      TargetPipelineVersion: !GetAtt PingPongCodePipeline.Version
+
+Outputs:
+  PingPongCodePipelineWebhookURL:
+    Description: URL of the webhook to trigger the code pipeline
+    Value: !GetAtt 'PingPongCodePipelineWebhook.Url'
+    Export:
+      Name: PingPongCodePipelineWebhookURL

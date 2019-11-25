@@ -1,0 +1,140 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: Deploy Ping Pong application on Fargate
+
+Parameters:
+  ImageTag:
+    Type: String
+    Default: latest
+
+Resources:
+
+  PingPongCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: PingPong-Cluster
+
+  PingPongTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: pingpongservice
+      Cpu: 256
+      Memory: 512
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+      - FARGATE
+      ExecutionRoleArn: !ImportValue ECSServiceRoleArn
+      TaskRoleArn: !ImportValue ECSTaskRoleArn
+      ContainerDefinitions:
+        # TODO: change to PingPong-Container
+      - Name: PingPong-Service
+        Image: !Join ['', [!ImportValue 'PingPongDockerRepoUri', ':', !Ref ImageTag]]
+        PortMappings:
+        - ContainerPort: 8080
+          Protocol: HTTP
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group: ping-pong-logs
+            awslogs-region: eu-west-1
+            awslogs-stream-prefix: awslogs-ping-pong-service
+        Essential: true
+
+  PingPongLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: ping-pong-nlb
+      Scheme: internet-facing
+      Subnets:
+      - !ImportValue PublicSubnetOne
+      - !ImportValue PublicSubnetTwo
+      Type: network
+
+  PingPongLoadBalancerTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: PingPong-TargetGroup
+      Port: 8080
+      Protocol: TCP
+      TargetType: ip
+      VpcId: !ImportValue VPCId
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /_health_check
+      HealthCheckProtocol: HTTP
+      HealthyThresholdCount: 3
+      UnhealthyThresholdCount: 3
+
+  PingPongLoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !Ref PingPongLoadBalancerTargetGroup
+      LoadBalancerArn: !Ref PingPongLoadBalancer
+      Port: 80
+      Protocol: TCP
+
+  FargateContainerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Access to the fargate containers from the Internet
+      VpcId: !ImportValue VPCId
+      SecurityGroupIngress:
+      # Allow access to NLB from anywhere on the internet
+      - CidrIp: 0.0.0.0/0
+        IpProtocol: -1
+
+  PingPongService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: PingPong-Service
+      Cluster: !Ref PingPongCluster
+      LaunchType: FARGATE
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 0
+      DesiredCount: 2
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+          - !Ref FargateContainerSecurityGroup
+          Subnets:
+          - !ImportValue PrivateSubnetOne
+          - !ImportValue PrivateSubnetTwo
+      TaskDefinition: !Ref PingPongTaskDefinition
+      LoadBalancers:
+      - ContainerName: PingPong-Service
+        ContainerPort: 8080
+        TargetGroupArn: !Ref PingPongLoadBalancerTargetGroup
+    # If not included then the following error is returned:
+    # The target group with targetGroupArn ... does not have an associated load balancer
+    # Explanation: at the point at which the PingPongService is created,
+    # the PingPongLoadBalancerListener won't necessarily have been created,
+    # in which case the PingPongLoadBalancerTargetGroup won't be associated
+    # with the PingPongLoadBalancer
+    DependsOn: PingPongLoadBalancerListener
+
+  PingPongLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: ping-pong-logs
+      RetentionInDays: 14
+
+Outputs:
+  PingPongClusterName:
+    Value: !Ref PingPongCluster
+    Export:
+      Name: PingPongClusterName
+  PingPongServiceName:
+    Value: !GetAtt PingPongService.Name
+    Export:
+      Name: PingPongServiceName
+  LoadBalancerDNSName:
+    Value: !GetAtt PingPongLoadBalancer.DNSName
+    Export:
+      Name: PingPongLoadBalancerDNSName
+  LoadBalancerArn:
+    Value: !Ref PingPongLoadBalancer
+    Export:
+      Name: PingPongLoadBalancerArn
